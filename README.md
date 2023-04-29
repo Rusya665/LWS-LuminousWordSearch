@@ -16,7 +16,7 @@ This repository contains a Python script that searches for specific keywords in 
 
 ## Usage
 
-![img.png](img.png)
+![img.png](Media/img.png)
 1. Download the latest executable from the [Releases](https://github.com/Rusya665/Artticles_parser/releases) section.
 2. Install the program to your computer (Windows only). For all OS you also can utilize the sourse python code. NOTE: in this case explicitly download NLTK data (`nltk.download('wordnet')` and `nltk.download('punkt')`)  
 3. Run the `PDF_docx_searcher.exe` file.
