@@ -1,4 +1,4 @@
-# Artticles_parser
+# LWS - LuminousWordSearch
 
 
 This repository contains a Python script that searches for specific keywords in PDF and Word documents. The script utilizes several libraries, such as `PyPDF2`, `docx`, and `nltk`, and makes use of `ThreadPoolExecutor` from the `concurrent.futures` module for concurrent processing.

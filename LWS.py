@@ -1,6 +1,6 @@
+import concurrent.futures
 import os
 import re
-import concurrent.futures
 from tkinter import filedialog, StringVar, Text, messagebox
 from typing import List, Generator, Optional, Tuple, Union
 
@@ -12,21 +12,41 @@ from nltk.tokenize import sent_tokenize
 
 
 class DocumentProcessor:
-    def __init__(self, search_folder: str, search_word: str, restrict: bool):
+    def __init__(self, search_folder: str, search_word: str, restrict: bool, tokenized_sentences=None):
         """
         Initialize the DocumentProcessor.
 
         :param search_folder: The folder path to search for documents.
         :param search_word: The word to search for.
         :param restrict: Whether to restrict the search or not.
+        :param tokenized_sentences: A pre-tokenized dictionary of sentences for each file (default: None).
         """
         self.search_folder = search_folder
-        self.search_word = search_word
-        self.restrict = restrict
-        self.synonyms = self.get_synonyms()
+        self._search_word = search_word
+        self._restrict_search = restrict
+        self.synonyms = self.get_synonyms() if not self._restrict_search else []
         self.docs_count = 0
         self.all_docs = 0
+        self.tokenized_sentences = tokenized_sentences if tokenized_sentences is not None else {}
         self.get_all_docs()
+
+    @property
+    def restrict_search(self):
+        return self._restrict_search
+
+    @restrict_search.setter
+    def restrict_search(self, new_restrict_search_bool: bool):
+        self._restrict_search = new_restrict_search_bool
+        self.synonyms = self.get_synonyms() if not self._restrict_search else []
+
+    @property
+    def search_word(self):
+        return self._search_word
+
+    @search_word.setter
+    def search_word(self, new_search_word: str):
+        self._search_word = new_search_word
+        self.synonyms = self.get_synonyms() if not self._restrict_search else []
 
     def get_synonyms(self) -> List[str]:
         """
@@ -35,7 +55,7 @@ class DocumentProcessor:
         :return: A list of synonyms.
         """
         synonyms = set()
-        for syn in wordnet.synsets(self.search_word):
+        for syn in wordnet.synsets(self._search_word):
             for lemma in syn.lemmas():
                 synonyms.add(lemma.name())
         return list(synonyms)
@@ -71,20 +91,28 @@ class DocumentProcessor:
                  Each match is represented by a tuple with the page number, sentence number, and the highlighted line.
                  Returns None if no matches are found.
         """
-        with open(file_path, "rb") as file:
-            if file_path.endswith(".pdf"):
-                reader = PyPDF2.PdfReader(file)
-                text_list = [page.extract_text() for page in reader.pages]
-            elif file_path.endswith(".docx"):
-                doc = docx.Document(file_path)
-                text_list = [paragraph.text for paragraph in doc.paragraphs]
-            else:
-                return None
+        if file_path not in self.tokenized_sentences:
+            with open(file_path, "rb") as file:
+                if file_path.endswith(".pdf"):
+                    reader = PyPDF2.PdfReader(file)
+                    text_list = [page.extract_text() for page in reader.pages]
+                elif file_path.endswith(".docx"):
+                    doc = docx.Document(file_path)
+                    text_list = [paragraph.text for paragraph in doc.paragraphs]
+                else:
+                    return None
 
-        if self.restrict:
-            matches = self.process_text(text_list, restrict=True)
+            lines = []
+            for text in text_list:
+                lines.extend(sent_tokenize(text))
+            self.tokenized_sentences[file_path] = lines
         else:
-            matches = self.process_text(text_list)
+            lines = self.tokenized_sentences[file_path]
+
+        if self._restrict_search:
+            matches = self.process_text(lines, restrict=True)
+        else:
+            matches = self.process_text(lines)
         return [[file_path, len(matches), matches]] if matches else None
 
     def process_text(self, text_list: List[str], restrict: bool = False) -> list[list[Union[int, str]]]:
@@ -103,9 +131,9 @@ class DocumentProcessor:
 
             for line_num, line in enumerate(lines):
                 if restrict:
-                    search_pattern = r'\b{}\b'.format(self.search_word)
+                    search_pattern = r'\b{}\b'.format(self._search_word)
                 else:
-                    search_pattern = r'\b({}|{})\b'.format(self.search_word, '|'.join(map(re.escape, self.synonyms)))
+                    search_pattern = r'({}|{})'.format(self._search_word, '|'.join(map(re.escape, self.synonyms)))
                 found_words = re.findall(search_pattern, line, re.IGNORECASE)
 
                 if found_words:
@@ -137,6 +165,10 @@ class WordFinderGUI:
 
         :param master: The master CustomTkinter window.
         """
+        self.tokenized_sentences = None
+        self.current_directory = None
+        self.processor = None
+
         self.master = master
         self.master.minsize(800, 250)
         self.master.title("Word Finder")
@@ -265,6 +297,17 @@ class WordFinderGUI:
             if response == "no":
                 return
 
+        # Check if the processor should be updated
+        if self.processor is None or self.current_directory != folder:
+            self.processor = DocumentProcessor(folder, search_word, restrict_search)
+            self.current_directory = folder
+
+        if search_word != self.processor.search_word:
+            self.processor.search_word = search_word
+
+        if restrict_search != self.processor.restrict_search:
+            self.processor.restrict_search = restrict_search
+
         self.result_text.delete('1.0', 'end')
         self.display_result("Results of searching for ", "black")
         self.display_result(search_word, "orange")
@@ -272,14 +315,13 @@ class WordFinderGUI:
         self.progress_bar.set(0)
         self.master.update()
 
-        processor = DocumentProcessor(folder, search_word, restrict_search)
-        synonyms = processor.synonyms
+        # processor = DocumentProcessor(folder, search_word, restrict_search, self.tokenized_sentences)
+        synonyms = self.processor.synonyms
         total_matches = 0
-
-        results = processor.process_files()
+        results = self.processor.process_files()
         for result in results:
             file_path, _, line_lists = result
-            self.progress_bar.set(processor.docs_count / processor.all_docs)
+            self.progress_bar.set(self.processor.docs_count / self.processor.all_docs)
             self.master.update_idletasks()
             if not result:
                 pass
