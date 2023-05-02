@@ -95,39 +95,41 @@ class DocumentProcessor:
             with open(file_path, "rb") as file:
                 if file_path.endswith(".pdf"):
                     reader = PyPDF2.PdfReader(file)
-                    text_list = [page.extract_text() for page in reader.pages]
+                    page_texts = [page.extract_text() for page in reader.pages]
                 elif file_path.endswith(".docx"):
                     doc = docx.Document(file_path)
-                    text_list = [paragraph.text for paragraph in doc.paragraphs]
+                    page_texts = [paragraph.text for paragraph in doc.paragraphs]
                 else:
                     return None
 
             lines = []
-            for text in text_list:
+            for text in page_texts:
                 lines.extend(sent_tokenize(text))
             self.tokenized_sentences[file_path] = lines
         else:
             lines = self.tokenized_sentences[file_path]
+            # Reconstruct page_texts from lines
+            page_texts = [' '.join(lines)]
 
         if self._restrict_search:
-            matches = self.process_text(lines, restrict=True)
+            matches = self.process_text(page_texts, restrict=True)
         else:
-            matches = self.process_text(lines)
+            matches = self.process_text(page_texts)
         return [[file_path, len(matches), matches]] if matches else None
 
-    def process_text(self, text_list: List[str], restrict: bool = False) -> list[list[Union[int, str]]]:
+    def process_text(self, page_texts: List[str], restrict: bool = False) -> list[list[Union[int, str]]]:
         """
         Process a list of text and search for occurrences of the search word.
 
-        :param text_list: The list of text to process.
+        :param page_texts: The list of text to process.
         :param restrict: Whether to restrict the search to only direct matches.
         :return: A list of matches found in the text.
                  Each match is represented by a tuple with the page number, sentence number, and the highlighted line.
         """
         matches = []
 
-        for page_num, text in enumerate(text_list):
-            lines = sent_tokenize(text)
+        for page_num, page_text in enumerate(page_texts):
+            lines = sent_tokenize(page_text)
 
             for line_num, line in enumerate(lines):
                 if restrict:
@@ -171,7 +173,11 @@ class WordFinderGUI:
 
         self.master = master
         self.master.minsize(800, 250)
-        self.master.title("Word Finder")
+        if ctk.get_appearance_mode() == 'Dark':
+            self.master.iconbitmap('Media/white_icon.ico')
+        if ctk.get_appearance_mode() == 'White':
+            self.master.iconbitmap('Media/dark_icon.ico')
+        self.master.title("LWS - LuminousWordSearch")
         self.search_folder = StringVar()
         self.left_frame = ctk.CTkFrame(self.master)
         self.left_frame.grid(row=0, column=0, sticky="nsew")
