@@ -173,10 +173,11 @@ class WordFinderGUI:
 
         self.master = master
         self.master.minsize(800, 250)
+
         if ctk.get_appearance_mode() == 'Dark':
-            self.master.iconbitmap('Media/white_icon.ico')
-        if ctk.get_appearance_mode() == 'White':
-            self.master.iconbitmap('Media/dark_icon.ico')
+            self.master.iconbitmap('Media/white.ico')
+        if ctk.get_appearance_mode() == 'Light':
+            self.master.iconbitmap('Media/dark.ico')
         self.master.title("LWS - LuminousWordSearch")
         self.search_folder = StringVar()
         self.left_frame = ctk.CTkFrame(self.master)
