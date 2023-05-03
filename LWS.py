@@ -95,52 +95,56 @@ class DocumentProcessor:
             with open(file_path, "rb") as file:
                 if file_path.endswith(".pdf"):
                     reader = PyPDF2.PdfReader(file)
-                    page_texts = [page.extract_text() for page in reader.pages]
+                    page_texts = [(page_num, page.extract_text()) for page_num, page in enumerate(reader.pages)]
                 elif file_path.endswith(".docx"):
                     doc = docx.Document(file_path)
-                    page_texts = [paragraph.text for paragraph in doc.paragraphs]
+                    page_texts = [(page_num, paragraph.text) for page_num, paragraph in enumerate(doc.paragraphs)]
                 else:
                     return None
 
-            lines = []
-            for text in page_texts:
-                lines.extend(sent_tokenize(text))
-            self.tokenized_sentences[file_path] = lines
+                lines = []
+                for page_num, text in page_texts:
+                    for sentence in sent_tokenize(text):
+                        lines.append((page_num, sentence))
+                self.tokenized_sentences[file_path] = lines
         else:
             lines = self.tokenized_sentences[file_path]
-            # Reconstruct page_texts from lines
-            page_texts = [' '.join(lines)]
 
         if self._restrict_search:
-            matches = self.process_text(page_texts, restrict=True)
+            matches = self.process_text(lines, restrict=True)
         else:
-            matches = self.process_text(page_texts)
+            matches = self.process_text(lines)
         return [[file_path, len(matches), matches]] if matches else None
 
-    def process_text(self, page_texts: List[str], restrict: bool = False) -> list[list[Union[int, str]]]:
+    def process_text(self, lines: List[Tuple[int, str]], restrict: bool = False) -> list[list[Union[int, str]]]:
         """
         Process a list of text and search for occurrences of the search word.
 
-        :param page_texts: The list of text to process.
+        :param lines: The list of text to process, containing tuples with page numbers and sentences.
         :param restrict: Whether to restrict the search to only direct matches.
         :return: A list of matches found in the text.
                  Each match is represented by a tuple with the page number, sentence number, and the highlighted line.
         """
         matches = []
+        prev_page_num = 0
+        sentence_num_in_page = 0
 
-        for page_num, page_text in enumerate(page_texts):
-            lines = sent_tokenize(page_text)
+        for line_num, (page_num, line) in enumerate(lines):
+            if prev_page_num != page_num:
+                sentence_num_in_page = 0
+                prev_page_num = page_num
 
-            for line_num, line in enumerate(lines):
-                if restrict:
-                    search_pattern = r'\b{}\b'.format(self._search_word)
-                else:
-                    search_pattern = r'({}|{})'.format(self._search_word, '|'.join(map(re.escape, self.synonyms)))
-                found_words = re.findall(search_pattern, line, re.IGNORECASE)
+            if restrict:
+                search_pattern = r'\b{}\b'.format(self._search_word)
+            else:
+                search_pattern = r'({}|{})'.format(self._search_word, '|'.join(map(re.escape, self.synonyms)))
+            found_words = re.findall(search_pattern, line, re.IGNORECASE)
 
-                if found_words:
-                    line_highlighted = re.sub(search_pattern, lambda m: f'<<{m.group(0)}>>', line)
-                    matches.append([page_num, line_num, line_highlighted])
+            if found_words:
+                line_highlighted = re.sub(search_pattern, lambda m: f'<<{m.group(0)}>>', line)
+                matches.append([page_num, sentence_num_in_page, line_highlighted])
+
+            sentence_num_in_page += 1
 
         return matches
 
@@ -160,105 +164,35 @@ class DocumentProcessor:
             return results
 
 
-class WordFinderGUI:
-    def __init__(self, master):
+class WordFinderGUI(ctk.CTk):
+    def __init__(self, *args, **kwargs):
+
         """
         Initialize the WordFinderGUI.
 
-        :param master: The master CustomTkinter window.
         """
+        super().__init__(*args, **kwargs)
         self.tokenized_sentences = None
         self.current_directory = None
         self.processor = None
 
-        self.master = master
-        self.master.minsize(800, 250)
+        self.minsize(800, 250)
 
         if ctk.get_appearance_mode() == 'Dark':
-            self.master.iconbitmap('Media/white.ico')
+            self.iconbitmap('Media/white.ico')
         if ctk.get_appearance_mode() == 'Light':
-            self.master.iconbitmap('Media/dark.ico')
-        self.master.title("LWS - LuminousWordSearch")
-        self.search_folder = StringVar()
-        self.left_frame = ctk.CTkFrame(self.master)
+            self.iconbitmap('Media/dark.ico')
+        self.title("LWS - LuminousWordSearch")
+
+        self.left_frame = LeftFrame(self)
         self.left_frame.grid(row=0, column=0, sticky="nsew")
 
-        self.right_frame = ctk.CTkFrame(self.master)
+        self.right_frame = RightFrame(self)
         self.right_frame.grid(row=0, column=1, sticky="nsew")
 
-        # Configure the grid weights
-        self.master.grid_rowconfigure(0, weight=1)
-        self.master.grid_columnconfigure(0, weight=0)
-        self.master.grid_columnconfigure(1, weight=1)
-
-        self.folder_label = ctk.CTkLabel(self.left_frame, text="Search folder:")
-        self.folder_entry = ctk.CTkEntry(self.left_frame, textvariable=self.search_folder)
-        self.browse_button = ctk.CTkButton(self.left_frame, text="Browse", command=self.browse_folder)
-        self.word_label = ctk.CTkLabel(self.left_frame, text="Search word:")
-        self.word_entry = ctk.CTkEntry(self.left_frame)
-        self.word_entry.bind("<KeyPress>", self.no_space_keypress)
-        self.word_entry.bind("<Return>", self.search)
-        self.restrict_var = ctk.BooleanVar()
-        self.restrict_check = ctk.CTkCheckBox(self.left_frame, text="Restrict search", variable=self.restrict_var)
-        self.search_button = ctk.CTkButton(self.left_frame, text="Search", command=self.search)
-        self.progress_bar = ctk.CTkProgressBar(self.left_frame)
-        self.progress_bar.set(0)
-        self.folder_label.grid(row=0, column=0, padx=5, pady=5)
-        self.folder_entry.grid(row=0, column=1, padx=5, pady=5)
-        self.browse_button.grid(row=0, column=2, padx=5, pady=5)
-        self.word_label.grid(row=1, column=0, padx=5, pady=5)
-        self.word_entry.grid(row=1, column=1, padx=5, pady=5)
-        self.restrict_check.grid(row=1, column=2, padx=5, pady=5)
-        self.search_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5)
-        self.progress_bar.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-        self.result_text = Text(self.right_frame, wrap='word')
-        self.scroll_bar = ctk.CTkScrollbar(self.right_frame, command=self.result_text.yview)
-        self.scroll_bar.grid(row=0, column=1, sticky='nsew')
-        self.result_text['yscrollcommand'] = self.scroll_bar.set
-        self.result_text.grid(row=0, column=0, pady=5, sticky="nsew")
-        self.right_frame.rowconfigure(0, weight=1)
-        self.right_frame.columnconfigure(0, weight=1)
-        self.result_text.tag_configure("orange", foreground="orange")
-
-        self.font_controls_frame = ctk.CTkFrame(self.left_frame)
-        self.font_controls_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=5)
-
-        # Font size buttons
-        self.font_size_label = ctk.CTkLabel(self.font_controls_frame, text="Font Size:")
-        self.font_size_label.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        self.increase_font_button = ctk.CTkButton(self.font_controls_frame, text="+", width=20, height=20,
-                                                  command=lambda: self.update_font("increase"))
-        self.decrease_font_button = ctk.CTkButton(self.font_controls_frame, text="-", width=20, height=20,
-                                                  command=lambda: self.update_font("decrease"))
-        self.increase_font_button.grid(row=1, column=0, padx=(0, 2), pady=5)
-        self.decrease_font_button.grid(row=1, column=1, padx=(2, 0), pady=5)
-
-        # Font face OptionMenu
-        self.font_face_label = ctk.CTkLabel(self.font_controls_frame, text="Font:")
-        self.font_face_label.grid(row=0, column=3, padx=5, pady=5, sticky="EW")
-        self.font_var = ctk.StringVar()
-        self.available_fonts = ["Arial", "Courier", "Helvetica", "Times New Roman", "Verdana", "Comic Sans MS",
-                                "Georgia", "Lucida Sans", "Tahoma", "Trebuchet MS"]
-        self.font_var.set(self.available_fonts[0])
-
-        def option_menu_callback(choice):
-            self.update_font("change_face", choice)
-
-        self.font_option_menu = ctk.CTkOptionMenu(master=self.font_controls_frame,
-                                                  values=self.available_fonts,
-                                                  command=option_menu_callback,
-                                                  variable=self.font_var)
-        self.font_option_menu.grid(row=1, column=3, columnspan=2, padx=5, pady=5, sticky="EW")
-        self.font_controls_frame.grid_rowconfigure(0, weight=1)
-        self.font_controls_frame.grid_rowconfigure(1, weight=5)
-        self.font_controls_frame.grid_columnconfigure(0, weight=1)
-        self.font_controls_frame.grid_columnconfigure(1, weight=1)
-        self.font_controls_frame.grid_columnconfigure(2, weight=9)
-
-    @staticmethod
-    def no_space_keypress(event):
-        if event.keysym == "space":
-            return "break"
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
 
     def display_result(self, text: str, color=None) -> None:
         """
@@ -269,11 +203,11 @@ class WordFinderGUI:
         :return: None
         """
         if color:
-            self.result_text.tag_configure(color, foreground=color)
-            self.result_text.insert("end", text, color)
+            self.right_frame.result_text.tag_configure(color, foreground=color)
+            self.right_frame.result_text.insert("end", text, color)
         else:
-            self.result_text.insert("end", text)
-        self.result_text.update_idletasks()
+            self.right_frame.result_text.insert("end", text)
+        self.right_frame.result_text.update_idletasks()
 
     def browse_folder(self) -> None:
         """
@@ -282,7 +216,7 @@ class WordFinderGUI:
         """
         folder = filedialog.askdirectory()
         if folder:
-            self.search_folder.set(folder)
+            self.left_frame.search_folder.set(folder)
 
     def search(self, event=None) -> None:
         """
@@ -290,9 +224,9 @@ class WordFinderGUI:
         :param event: Tkinter event (default: None)
         :return: None
         """
-        search_word = self.word_entry.get()
-        folder = self.search_folder.get()
-        restrict_search = self.restrict_var.get()
+        search_word = self.left_frame.word_entry.get()
+        folder = self.left_frame.search_folder.get()
+        restrict_search = self.left_frame.restrict_var.get()
 
         if not search_word or not folder:
             messagebox.showwarning("Warning", "Please provide a search word and folder.")
@@ -315,21 +249,28 @@ class WordFinderGUI:
         if restrict_search != self.processor.restrict_search:
             self.processor.restrict_search = restrict_search
 
-        self.result_text.delete('1.0', 'end')
+        self.right_frame.result_text.delete('1.0', 'end')
         self.display_result("Results of searching for ", "black")
         self.display_result(search_word, "orange")
         self.display_result("\n\n", "black")
-        self.progress_bar.set(0)
-        self.master.update()
+        self.left_frame.progress_bar.set(0)
+        self.update()
 
-        # processor = DocumentProcessor(folder, search_word, restrict_search, self.tokenized_sentences)
         synonyms = self.processor.synonyms
+        if synonyms:
+            for tic, synonym in enumerate(synonyms):
+                self.left_frame.synonyms_frame.synonyms_text_box.insert("end", synonym, "purple")
+                if tic < len(synonyms):
+                    self.left_frame.synonyms_frame.synonyms_text_box.insert("end", ', ', "purple")
+        if not synonyms:
+            self.left_frame.synonyms_frame.synonyms_text_box.insert("end", 'Restricted mode, no synonyms are allowed',
+                                                                    "purple")
         total_matches = 0
         results = self.processor.process_files()
         for result in results:
             file_path, _, line_lists = result
-            self.progress_bar.set(self.processor.docs_count / self.processor.all_docs)
-            self.master.update_idletasks()
+            self.left_frame.progress_bar.set(self.processor.docs_count / self.processor.all_docs)
+            self.update_idletasks()
             if not result:
                 pass
             file_name = os.path.basename(file_path)
@@ -403,9 +344,9 @@ class WordFinderGUI:
         :param value: The font face to change to when the action is "change_face".
         :return: None
         """
-        current_font = self.result_text.cget("font")
-        current_font_size = self.result_text.tk.call("font", "actual", current_font, "-size")
-        current_font_face = self.result_text.tk.call("font", "actual", current_font, "-family")
+        current_font = self.right_frame.result_text.cget("font")
+        current_font_size = self.right_frame.result_text.tk.call("font", "actual", current_font, "-size")
+        current_font_face = self.right_frame.result_text.tk.call("font", "actual", current_font, "-family")
         new_font_size = current_font_size
 
         if action == "increase":
@@ -416,10 +357,105 @@ class WordFinderGUI:
             current_font_face = value
 
         if new_font_size > 0:
-            self.result_text.configure(font=(current_font_face, new_font_size))
+            self.right_frame.result_text.configure(font=(current_font_face, new_font_size))
+
+
+class LeftFrame(ctk.CTkFrame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(master=parent, *args, **kwargs)
+        self.parent = parent
+        self.search_folder = StringVar()
+        self.folder_label = ctk.CTkLabel(self, text="Search folder:")
+        self.folder_entry = ctk.CTkEntry(self, textvariable=self.search_folder)
+        self.browse_button = ctk.CTkButton(self, text="Browse", command=self.parent.browse_folder)
+        self.word_label = ctk.CTkLabel(self, text="Search word:")
+        self.word_entry = ctk.CTkEntry(self)
+        self.word_entry.bind("<KeyPress>", self.no_space_keypress)
+        self.word_entry.bind("<Return>", self.parent.search)
+        self.restrict_var = ctk.BooleanVar()
+        self.restrict_check = ctk.CTkCheckBox(self, text="Restrict search", variable=self.restrict_var)
+        self.search_button = ctk.CTkButton(self, text="Search", command=self.parent.search)
+        self.progress_bar = ctk.CTkProgressBar(self)
+        self.progress_bar.set(0)
+        self.folder_label.grid(row=0, column=0, padx=5, pady=5)
+        self.folder_entry.grid(row=0, column=1, padx=5, pady=5)
+        self.browse_button.grid(row=0, column=2, padx=5, pady=5)
+        self.word_label.grid(row=1, column=0, padx=5, pady=5)
+        self.word_entry.grid(row=1, column=1, padx=5, pady=5)
+        self.restrict_check.grid(row=1, column=2, padx=5, pady=5)
+        self.search_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5)
+        self.progress_bar.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+
+        self.font_controls_frame = FontControlFrame(self)
+        self.font_controls_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=5)
+
+        self.synonyms_frame = SynonymsFrame(self)
+        self.synonyms_frame.grid(row=5, column=0, columnspan=3, padx=5, pady=5)
+
+    @staticmethod
+    def no_space_keypress(event):
+        if event.keysym == "space":
+            return "break"
+
+
+class RightFrame(ctk.CTkFrame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(master=parent, *args, **kwargs)
+        self.parent = parent
+        self.result_text = Text(self, wrap='word')
+        self.result_text.grid(row=0, column=0, pady=5, sticky="nsew")
+        self.result_text.tag_configure("orange", foreground="orange")
+        self.scroll_bar = ctk.CTkScrollbar(self, command=self.result_text.yview)
+        self.scroll_bar.grid(row=0, column=1, sticky='nsew')
+        self.result_text['yscrollcommand'] = self.scroll_bar.set
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+
+class FontControlFrame(ctk.CTkFrame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(master=parent, *args, **kwargs)
+        self.parent = parent
+        self.font_size_label = ctk.CTkLabel(self, text="Font Size:")
+        self.font_size_label.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+        self.increase_font_button = ctk.CTkButton(self, text="+", width=20, height=20,
+                                                  command=lambda: self.parent.update_font("increase"))
+        self.decrease_font_button = ctk.CTkButton(self, text="-", width=20, height=20,
+                                                  command=lambda: self.parent.update_font("decrease"))
+        self.increase_font_button.grid(row=1, column=0, padx=(0, 2), pady=5)
+        self.decrease_font_button.grid(row=1, column=1, padx=(2, 0), pady=5)
+
+        # Font face OptionMenu
+        self.font_face_label = ctk.CTkLabel(self, text="Font:")
+        self.font_face_label.grid(row=0, column=3, padx=5, pady=5, sticky="EW")
+        self.font_var = ctk.StringVar()
+        self.available_fonts = ["Arial", "Courier", "Helvetica", "Times New Roman", "Verdana", "Comic Sans MS",
+                                "Georgia", "Lucida Sans", "Tahoma", "Trebuchet MS"]
+        self.font_var.set(self.available_fonts[0])
+
+        def option_menu_callback(choice):
+            self.parent.update_font("change_face", choice)
+
+        self.font_option_menu = ctk.CTkOptionMenu(master=self,
+                                                  values=self.available_fonts,
+                                                  command=option_menu_callback,
+                                                  variable=self.font_var)
+        self.font_option_menu.grid(row=1, column=3, columnspan=2, padx=5, pady=5, sticky="EW")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=5)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=9)
+
+
+class SynonymsFrame(ctk.CTkFrame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(master=parent, *args, **kwargs)
+        self.parent = parent
+        self.synonyms_text_box = Text(self, wrap='word', height=10, width=40)
+        self.synonyms_text_box.pack(pady=5)
 
 
 if __name__ == "__main__":
-    root = ctk.CTk()
-    app = WordFinderGUI(root)
+    root = WordFinderGUI()
     root.mainloop()
