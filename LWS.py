@@ -164,11 +164,11 @@ class DocumentProcessor:
             return results
 
 
-class WordFinderGUI(ctk.CTk):
+class LWSgui(ctk.CTk):
     def __init__(self, *args, **kwargs):
 
         """
-        Initialize the WordFinderGUI.
+        Initialize the LWSgui.
 
         """
         super().__init__(*args, **kwargs)
@@ -193,6 +193,7 @@ class WordFinderGUI(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
+        self.mainloop()
 
     def display_result(self, text: str, color=None) -> None:
         """
@@ -249,6 +250,7 @@ class WordFinderGUI(ctk.CTk):
         if restrict_search != self.processor.restrict_search:
             self.processor.restrict_search = restrict_search
 
+        self.left_frame.synonyms_frame.synonyms_text_box.delete('1.0', 'end')
         self.right_frame.result_text.delete('1.0', 'end')
         self.display_result("Results of searching for ", "black")
         self.display_result(search_word, "orange")
@@ -257,14 +259,27 @@ class WordFinderGUI(ctk.CTk):
         self.update()
 
         synonyms = self.processor.synonyms
+        self.left_frame.synonyms_frame.synonyms_text_box.tag_configure("purple", foreground="purple")
         if synonyms:
             for tic, synonym in enumerate(synonyms):
                 self.left_frame.synonyms_frame.synonyms_text_box.insert("end", synonym, "purple")
-                if tic < len(synonyms):
+                if tic < len(synonyms) - 1:
                     self.left_frame.synonyms_frame.synonyms_text_box.insert("end", ', ', "purple")
         if not synonyms:
-            self.left_frame.synonyms_frame.synonyms_text_box.insert("end", 'Restricted mode, no synonyms are allowed',
-                                                                    "purple")
+            if not restrict_search:
+                self.left_frame.synonyms_frame.synonyms_text_box.tag_configure("red", foreground="red")
+                self.left_frame.synonyms_frame.synonyms_text_box.insert("end",
+                                                                        'You are in the non-optimized and dangerous'
+                                                                        ' mode!\nAnything you find can and will be '
+                                                                        'used against you in a court of science!',
+                                                                        "red")
+            if restrict_search:
+                self.left_frame.synonyms_frame.synonyms_text_box.insert("end",
+                                                                        'Restricted mode, no synonyms are allowed'
+                                                                        '\nYou are amazing as always, love you!',
+                                                                        "purple")
+        self.left_frame.synonyms_frame.synonyms_text_box.update_idletasks()
+        self.left_frame.progress_bar.set(0)
         total_matches = 0
         results = self.processor.process_files()
         for result in results:
@@ -338,29 +353,37 @@ class WordFinderGUI(ctk.CTk):
 
     def update_font(self, action, value=None):
         """
-        Update the font size or font face of the result text box based on button clicks or option menu selection.
+        Update the font size or font face of the result_text and synonyms_text_box based on button clicks or option
+        menu selection.
 
         :param action: The action to perform, either "increase", "decrease", or "change_face".
         :param value: The font face to change to when the action is "change_face".
         :return: None
         """
-        current_font = self.right_frame.result_text.cget("font")
-        current_font_size = self.right_frame.result_text.tk.call("font", "actual", current_font, "-size")
-        current_font_face = self.right_frame.result_text.tk.call("font", "actual", current_font, "-family")
-        new_font_size = current_font_size
+        widgets = [self.right_frame.result_text, self.left_frame.synonyms_frame.synonyms_text_box]
 
-        if action == "increase":
-            new_font_size += 1
-        elif action == "decrease":
-            new_font_size -= 1
-        elif action == "change_face":
-            current_font_face = value
+        for widget in widgets:
+            current_font = widget.cget("font")
+            current_font_size = widget.tk.call("font", "actual", current_font, "-size")
+            current_font_face = widget.tk.call("font", "actual", current_font, "-family")
+            new_font_size = current_font_size
 
-        if new_font_size > 0:
-            self.right_frame.result_text.configure(font=(current_font_face, new_font_size))
+            if action == "increase":
+                new_font_size += 1
+            elif action == "decrease":
+                new_font_size -= 1
+            elif action == "change_face":
+                current_font_face = value
+
+            if new_font_size > 0:
+                widget.configure(font=(current_font_face, new_font_size))
 
 
 class LeftFrame(ctk.CTkFrame):
+    """
+    Left frame of the LWSgui containing the search controls.
+    """
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(master=parent, *args, **kwargs)
         self.parent = parent
@@ -399,6 +422,10 @@ class LeftFrame(ctk.CTkFrame):
 
 
 class RightFrame(ctk.CTkFrame):
+    """
+    Right frame of the LWSgui containing the result text box.
+    """
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(master=parent, *args, **kwargs)
         self.parent = parent
@@ -413,15 +440,19 @@ class RightFrame(ctk.CTkFrame):
 
 
 class FontControlFrame(ctk.CTkFrame):
+    """
+    Frame containing font size and font face controls for the result_text and synonyms_text_box widgets.
+    """
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(master=parent, *args, **kwargs)
         self.parent = parent
         self.font_size_label = ctk.CTkLabel(self, text="Font Size:")
         self.font_size_label.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
         self.increase_font_button = ctk.CTkButton(self, text="+", width=20, height=20,
-                                                  command=lambda: self.parent.update_font("increase"))
+                                                  command=lambda: self.parent.parent.update_font("increase"))
         self.decrease_font_button = ctk.CTkButton(self, text="-", width=20, height=20,
-                                                  command=lambda: self.parent.update_font("decrease"))
+                                                  command=lambda: self.parent.parent.update_font("decrease"))
         self.increase_font_button.grid(row=1, column=0, padx=(0, 2), pady=5)
         self.decrease_font_button.grid(row=1, column=1, padx=(2, 0), pady=5)
 
@@ -434,7 +465,7 @@ class FontControlFrame(ctk.CTkFrame):
         self.font_var.set(self.available_fonts[0])
 
         def option_menu_callback(choice):
-            self.parent.update_font("change_face", choice)
+            self.parent.parent.update_font("change_face", choice)
 
         self.font_option_menu = ctk.CTkOptionMenu(master=self,
                                                   values=self.available_fonts,
@@ -449,13 +480,23 @@ class FontControlFrame(ctk.CTkFrame):
 
 
 class SynonymsFrame(ctk.CTkFrame):
+    """
+    Frame containing a text box to display the synonyms of the search word.
+    """
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(master=parent, *args, **kwargs)
         self.parent = parent
-        self.synonyms_text_box = Text(self, wrap='word', height=10, width=40)
-        self.synonyms_text_box.pack(pady=5)
+        self.configure(width=350, height=250)
+        self.pack_propagate(False)
+        self.synonyms_text_box_label = ctk.CTkLabel(self, text="Synonyms of searching word")
+        self.synonyms_text_box = Text(self, wrap='word', height=1, width=1)
+        self.synonyms_text_box_label.pack(pady=5)
+        self.synonyms_text_box.pack(side='left', pady=0, fill='both', expand=True)
+        self.synonyms_text_box_scroll_bar = ctk.CTkScrollbar(self, command=self.synonyms_text_box.yview)
+        self.synonyms_text_box_scroll_bar.pack(side='right', fill='both')
+        self.synonyms_text_box['yscrollcommand'] = self.synonyms_text_box_scroll_bar.set
 
 
 if __name__ == "__main__":
-    root = WordFinderGUI()
-    root.mainloop()
+    LWSgui()
