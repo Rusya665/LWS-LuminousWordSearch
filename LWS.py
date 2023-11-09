@@ -381,7 +381,7 @@ class LWSgui(ctk.CTk):
 
 class LeftFrame(ctk.CTkFrame):
     """
-    Left frame of the LWSgui containing the search controls.
+    The left frame of the LWSgui containing the search controls.
     """
 
     def __init__(self, parent, *args, **kwargs):
