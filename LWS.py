@@ -219,10 +219,10 @@ class LWSgui(ctk.CTk):
         if folder:
             self.left_frame.search_folder.set(folder)
 
-    def search(self, event=None) -> None:
+    def search(self, _event=None) -> None:
         """
         Perform the search based on the provided search word and folder.
-        :param event: Tkinter event (default: None)
+        :param _event: Tkinter event (default: None)
         :return: None
         """
         search_word = self.left_frame.word_entry.get()
