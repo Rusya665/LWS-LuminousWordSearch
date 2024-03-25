@@ -78,8 +78,12 @@ class DocumentProcessor:
         for root_dir, _, files in os.walk(self.search_folder):
             for file in files:
                 if file.endswith(".pdf") or file.endswith(".docx"):
+                    # self.docs_count += 1
+                    # yield os.path.join(root_dir, file)
+                    file_path = os.path.join(root_dir, file)
+                    normalized_path = os.path.normpath(file_path)
                     self.docs_count += 1
-                    yield os.path.join(root_dir, file)
+                    yield normalized_path
 
     def search_file(self, file_path) -> Optional[List[Tuple[str, int, List[Tuple[int, int, str]]]]]:
         """
@@ -92,6 +96,7 @@ class DocumentProcessor:
                  Returns None if no matches are found.
         """
         if file_path not in self.tokenized_sentences:
+
             with open(file_path, "rb") as file:
                 if file_path.endswith(".pdf"):
                     reader = PyPDF2.PdfReader(file)
