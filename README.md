@@ -1,44 +1,79 @@
-# LWS - LuminousWordSearch
+# LWS 2.0 — LuminousWordSearch
+Literature, Patent & Supplementary Information (SI) Intelligence Suite
 
+![LWS 2.0 Interface](Media/LWS.png)
 
-This repository contains a Python script that searches for specific keywords in PDF and Word documents. The script utilizes several libraries, such as `PyPDF2`, `docx`, and `nltk`, and makes use of `ThreadPoolExecutor` from the `concurrent.futures` module for concurrent processing.
+## Overview
 
-## Features
+**LWS 2.0** is a literature search engine and research intelligence suite for scientific papers, supplementary materials (SI), and patents. Built with high-speed `pypdfium2` extraction, SQLite FTS5 full-text indexing, WordNet + scientific chemical thesaurus expansion, and a dark glassmorphic interface powered by `pywebview`.
 
-- Search for keywords in multiple PDF and Word documents concurrently
-- Supports case-insensitive keyword matching
-- Generates a summary of the search results, including the number of occurrences and document names
-- Utilizes `ThreadPoolExecutor` for efficient concurrent processing
-- Highlights found keywords in different colors
-- Supports searching for synonyms
-- Provides a "Restrict" button for more refined searches
- 
+---
 
-## Usage
+## Key Features
 
-![img.png](Media/LWS.png)
-1. Download the latest executable from the [Releases](https://github.com/Rusya665/Artticles_parser/releases) section.
-2. Install the program to your computer (Windows only). For all OS you also can utilize the source python code. NOTE: in this case explicitly download NLTK data (`nltk.download('wordnet')` and `nltk.download('punkt')`)  
-3. Run the `PDF_docx_searcher.exe` file.
-4. Follow the on-screen prompts to select the folder containing the PDF and Word documents, and enter the word you want to search for. NOTE: you can also provide a phrase by, for example, copy-pasting it. In this case you will be asked in pop-up window do you want to continue, but the program behaviour with phrases is unexpected. Also, there is not direct support of synonyms for phrases.
-5. The results will be displayed with the found keywords highlighted in different colors. Red color represents a direct match, magenta - synonym.
-6. Use the `Restrict search` button for only direct matches.
+- **⚡ Blazing Fast Extraction:** Replaces legacy on-the-fly PDF parsing with `pypdfium2`, extracting text 10–25× faster across PDF, DOCX, and PPTX documents.
+- **🔍 SQLite FTS5 Search:** Millisecond full-text sentence search with BM25 ranking, snippet generation, and syntax highlighting (`hit-direct`, `hit-synonym`).
+- **🧬 Scientific & WordNet Thesaurus:** Domain-aware chemical expansion (PDMS, siloxane, TPO-L, LAP, CAL, GelMA) combined with NLTK WordNet.
+- **🖼️ Figure & Caption Harvesting:** Automatic extraction of embedded figures and diagrams paired with page captions (`Figure`, `Fig.`, `Chart`, `Scheme`).
+- **📑 Companion Bundling:** Automatically pairs main research papers with their companion Supplementary Information (SI), peer reviews, and slides.
+- **📁 Recursive Multi-Root Folders:** Scans multiple watch directories and nested subfolders to any depth, preserving category hierarchy.
+- **🎨 Modern Glassmorphic Interface:** Native desktop UI styled with dark glassmorphism (`#080B11`), split paper+SI reader, and figure galleries.
+- **🤖 AI Agent Integration:** Continuously synchronizes full-text Markdown in `.ai_cache/*.md`, `references.json`, and master catalog `REFERENCES.md`.
 
-## Known Issues
+---
 
-Due to a known issue with `ProcessPoolExecutor` and the creation of multiple windows when running the compiled executable, this script uses `ThreadPoolExecutor` for concurrent processing. This allows the script to work correctly as a standalone executable without causing any unexpected behavior.
+## Quickstart
 
-## Upcoming Features
+### 1. Requirements
 
-1. Renaming of files: Making the file naming in the project to be consistent.
-2. Improved search performance: Optimizations to enhance the search performance and provide faster results.
-3. Customizable color-coding: The ability to customize the color-coding of keywords in the search results.
-4. Advanced search options: Additional search parameters and filters to help users fine-tune their search queries and find the desired results more efficiently.
+Install dependencies using Python 3.10+:
+```powershell
+pip install -r requirements.txt
+```
 
-## Contributions
+### 2. Launch the Application
 
-Feel free to submit pull requests, report issues, or suggest enhancements.
+To launch the interactive GUI:
+```powershell
+python LWS.py
+```
+
+### 3. Headless Synchronization (CLI)
+
+To synchronize literature folders in background without opening the GUI:
+```powershell
+python LWS.py --dir "C:\Path\To\References" --headless-sync
+```
+
+Add `--no-figures` for faster text-only synchronization:
+```powershell
+python LWS.py --dir "C:\Path\To\References" --headless-sync --no-figures
+```
+
+---
+
+## Architecture
+
+```
+LWS-LuminousWordSearch/
+├── LWS.py                         # GUI launcher & CLI entrypoint
+├── lws_engine/
+│   ├── config.py                  # Multi-root workspace & MAX_PATH safety (\\?\)
+│   ├── database.py                # Thread-safe SQLite FTS5 (WAL mode, RLock)
+│   ├── extractors.py              # pypdfium2 PDF, DOCX, PPTX & sentence splitting
+│   ├── figure_extractor.py        # Figure harvesting & caption regex matching
+│   ├── bundler.py                 # Main, SI, Patent, Peer Review pairing
+│   ├── thesaurus.py               # Chemical domain dictionary + WordNet
+│   └── synchronizer.py            # Recursive synchronization & .ai_cache generator
+├── web_ui/
+│   ├── index.html                 # 3-pane glassmorphic layout
+│   ├── styles.css                 # Dark theme, glassmorphic styling
+│   └── app.js                     # Pywebview API bridge
+└── tests/                         # 114 passing unit and integration tests
+```
+
+---
 
 ## License
 
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+This project is licensed under the [MIT License](LICENSE).

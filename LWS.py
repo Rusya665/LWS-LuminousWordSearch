@@ -1,507 +1,420 @@
-import concurrent.futures
+"""
+LWS (LuminousWordSearch) 2.0
+============================
+Modern Literature, Patent & SI Intelligence Suite.
+Combines pypdfium2 high-speed extraction, SQLite FTS5 search, scientific & WordNet thesaurus,
+automatic figure and caption harvesting, companion document bundling (Main + SI),
+and a sleek dark glassmorphic interface built with pywebview.
+"""
+
 import os
+import sys
+import argparse
+import subprocess
+import logging
 import re
-from tkinter import filedialog, StringVar, Text, messagebox
-from typing import List, Generator, Optional, Tuple, Union
+import base64
+from pathlib import Path
+from typing import Dict, Any, List, Optional
 
-import PyPDF2
-import customtkinter as ctk
-import docx
-from nltk.corpus import wordnet, words
-from nltk.tokenize import sent_tokenize
+import webview
+
+from lws_engine.config import ConfigManager, win_safe_path
+from lws_engine.database import LwsDatabase
+from lws_engine.synchronizer import LwsSynchronizer
+from lws_engine.thesaurus import ThesaurusManager
+
+logger = logging.getLogger(__name__)
+
+BLOCKED_EXTENSIONS = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".scr", ".com", ".hta"}
 
 
-class DocumentProcessor:
-    def __init__(self, search_folder: str, search_word: str, restrict: bool, tokenized_sentences=None):
+class LwsApi:
+    """JavaScript API bridge exposed to the Web UI via window.pywebview.api."""
+
+    def __init__(self, config_mgr: ConfigManager, db: LwsDatabase, synchronizer: LwsSynchronizer, thesaurus: ThesaurusManager):
+        # Leading underscores are critical: pywebview's API generator recursively inspects
+        # all public attributes. Prefixing internal backend objects with '_' prevents pywebview
+        # from traversing into Window / COM WebView2 controllers or queues.
+        self._config_mgr = config_mgr
+        self._db = db
+        self._synchronizer = synchronizer
+        self._thesaurus = thesaurus
+        self._window: Optional[webview.Window] = None
+
+    def set_window(self, window: webview.Window):
+        self._window = window
+
+    def get_workspace_state(self) -> Dict[str, Any]:
+        """Returns watched folders and the cached list of documents."""
+        folders = self._config_mgr.get_watch_folders()
+        docs = self._db.list_all_documents(limit=1000)
+
+        folder_stats = []
+        for f in folders:
+            count = sum(1 for d in docs if d.get("watch_folder") == f)
+            folder_stats.append({
+                "path": f,
+                "exists": os.path.exists(win_safe_path(f)),
+                "doc_count": count
+            })
+
+        return {
+            "watch_folders": folders,
+            "folder_stats": folder_stats,
+            "documents": docs
+        }
+
+    def choose_folder_dialog(self) -> Dict[str, Any]:
         """
-        Initialize the DocumentProcessor.
-
-        :param search_folder: The folder path to search for documents.
-        :param search_word: The word to search for.
-        :param restrict: Whether to restrict the search or not.
-        :param tokenized_sentences: A pre-tokenized dictionary of sentences for each file (default: None).
+        Opens a native Windows Folder Picker dialog (NO browser prompt).
+        Supports choosing directory and immediately adds it to watched folders.
         """
-        self.search_folder = search_folder
-        self._search_word = search_word
-        self._restrict_search = restrict
-        self.synonyms = self.get_synonyms() if not self._restrict_search else []
-        self.docs_count = 0
-        self.all_docs = 0
-        self.tokenized_sentences = tokenized_sentences if tokenized_sentences is not None else {}
-        self.get_all_docs()
+        selected_folders = None
+        dialog_attempted = False
 
-    @property
-    def restrict_search(self):
-        return self._restrict_search
+        if self._window and hasattr(self._window, "create_file_dialog"):
+            try:
+                dialog_attempted = True
+                selected_folders = self._window.create_file_dialog(
+                    webview.FileDialog.FOLDER,
+                    allow_multiple=True
+                )
+            except Exception as e:
+                logger.warning(f"pywebview folder dialog failed, falling back to tkinter: {e}")
+                dialog_attempted = False
+                selected_folders = None
 
-    @restrict_search.setter
-    def restrict_search(self, new_restrict_search_bool: bool):
-        self._restrict_search = new_restrict_search_bool
-        self.synonyms = self.get_synonyms() if not self._restrict_search else []
+        if not dialog_attempted and not selected_folders:
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                chosen = filedialog.askdirectory(title="Select Folder to Watch in LWS")
+                root.destroy()
+                if chosen:
+                    selected_folders = [chosen]
+            except Exception as e:
+                logger.warning(f"Tkinter folder dialog failed: {e}")
 
-    @property
-    def search_word(self):
-        return self._search_word
+        added = []
+        if selected_folders:
+            for folder in selected_folders:
+                folder_str = str(folder).strip()
+                if folder_str and os.path.isdir(win_safe_path(folder_str)):
+                    self._config_mgr.add_watch_folder(folder_str)
+                    added.append(folder_str)
 
-    @search_word.setter
-    def search_word(self, new_search_word: str):
-        self._search_word = new_search_word
-        self.synonyms = self.get_synonyms() if not self._restrict_search else []
+        return {
+            "status": "ok",
+            "added_folders": added,
+            "watch_folders": self._config_mgr.get_watch_folders()
+        }
 
-    def get_synonyms(self) -> List[str]:
+    def add_watch_folder(self, folder_path: str) -> Dict[str, Any]:
+        """Adds a folder path string and registers it."""
+        if not folder_path or not folder_path.strip():
+            return {"status": "error", "message": "Folder path cannot be empty."}
+        norm_p = os.path.abspath(folder_path.strip().strip('"').strip("'"))
+        if not os.path.isdir(win_safe_path(norm_p)):
+            return {"status": "error", "message": f"Directory does not exist: {norm_p}"}
+
+        self._config_mgr.add_watch_folder(norm_p)
+        return {"status": "ok", "watch_folders": self._config_mgr.get_watch_folders()}
+
+    def remove_watch_folder(self, folder_path: str) -> Dict[str, Any]:
+        """Removes a watched folder."""
+        norm_p = os.path.abspath(folder_path.strip())
+        self._config_mgr.remove_watch_folder(norm_p)
+        return {"status": "ok", "watch_folders": self._config_mgr.get_watch_folders()}
+
+    def sync_folders(self) -> Dict[str, Any]:
+        """Synchronizes all watched directories."""
+        folders = self._config_mgr.get_watch_folders()
+        total_proc = 0
+        total_skip = 0
+        total_err = 0
+        details = []
+
+        for f in folders:
+            try:
+                res = self._synchronizer.sync_watch_folder(f)
+                total_proc += res.get("processed", 0)
+                total_skip += res.get("skipped", 0)
+                total_err += res.get("errors", 0)
+                details.append(res)
+            except Exception as e:
+                logger.error(f"Error syncing watch folder '{f}': {e}")
+                total_err += 1
+                details.append({"watch_folder": f, "processed": 0, "skipped": 0, "errors": 1, "error_message": str(e)})
+
+        return {
+            "status": "ok",
+            "processed": total_proc,
+            "skipped": total_skip,
+            "errors": total_err,
+            "details": details
+        }
+
+    def search_query(
+        self,
+        query: str,
+        use_synonyms: bool = True,
+        role_filter: str = "ALL",
+        regex_mode: bool = False
+    ) -> Dict[str, Any]:
         """
-        Get the synonyms of the search word using WordNet.
-
-        :return: A list of synonyms.
+        Executes a search query across all indexed sentences, supporting
+        FTS5 with synonym expansion or regular expression mode.
         """
-        synonyms = set()
-        for syn in wordnet.synsets(self._search_word):
-            for lemma in syn.lemmas():
-                synonyms.add(lemma.name())
-        return list(synonyms)
+        if not query or not query.strip():
+            return {"query": query, "synonyms": {}, "hits": []}
 
-    def get_all_docs(self) -> None:
-        """
-        Count the total number of documents in the search folder.
-        """
-        for root_dir, _, files in os.walk(self.search_folder):
-            for file in files:
-                if file.endswith(".pdf") or file.endswith(".docx"):
-                    self.all_docs += 1
+        q = query.strip()
+        if regex_mode:
+            try:
+                pattern = re.compile(q, re.IGNORECASE)
+            except re.error as e:
+                return {"query": query, "synonyms": {}, "hits": [], "error": f"Invalid regex: {e}"}
 
-    def get_files(self) -> Generator[str, None, None]:
-        """
-        Get the file paths of the documents to search.
+            hits = self._db.search_regex(
+                pattern=pattern,
+                role_filter=role_filter if role_filter != "ALL" else None,
+                limit=80
+            )
+            return {
+                "query": query,
+                "synonyms": {},
+                "hits": hits
+            }
 
-        :yield: The file path of each document.
-        """
-        for root_dir, _, files in os.walk(self.search_folder):
-            for file in files:
-                if file.endswith(".pdf") or file.endswith(".docx"):
-                    # self.docs_count += 1
-                    # yield os.path.join(root_dir, file)
-                    file_path = os.path.join(root_dir, file)
-                    normalized_path = os.path.normpath(file_path)
-                    self.docs_count += 1
-                    yield normalized_path
+        synonym_map = {}
+        all_syns = []
+        if use_synonyms and q:
+            synonym_map = self._thesaurus.expand_query(q, use_wordnet=True, use_scientific=True)
+            for s_list in synonym_map.values():
+                all_syns.extend(s_list)
 
-    def search_file(self, file_path) -> Optional[List[Tuple[str, int, List[Tuple[int, int, str]]]]]:
-        """
-        Search a specific file for occurrences of the search word.
+        hits = self._db.search_fts(
+            query=q,
+            synonyms=all_syns if use_synonyms else None,
+            role_filter=role_filter if role_filter != "ALL" else None,
+            limit=80
+        )
+        return {
+            "query": query,
+            "synonyms": synonym_map,
+            "hits": hits
+        }
 
-        :param file_path: The path of the file to search.
-        :return: A list containing information about the matches found in the file.
-                 Each item in the list is a tuple with the file path, the number of matches, and a list of matches.
-                 Each match is represented by a tuple with the page number, sentence number, and the highlighted line.
-                 Returns None if no matches are found.
-        """
-        if file_path not in self.tokenized_sentences:
+    def get_document_bundle(self, bundle_id: str) -> Dict[str, Any]:
+        """Retrieves all companion files in a bundle and their markdown text content."""
+        bundle_docs = self._db.get_bundle(bundle_id)
+        contents = {}
+        for doc in bundle_docs:
+            md_rel = doc.get("md_path")
+            watch_f = doc.get("watch_folder")
+            if md_rel and watch_f:
+                full_md = os.path.join(watch_f, md_rel)
+                if os.path.exists(win_safe_path(full_md)):
+                    try:
+                        with open(win_safe_path(full_md), "r", encoding="utf-8", errors="replace") as f:
+                            contents[doc["id"]] = f.read()
+                    except Exception:
+                        contents[doc["id"]] = ""
 
-            with open(file_path, "rb") as file:
-                if file_path.endswith(".pdf"):
-                    reader = PyPDF2.PdfReader(file)
-                    page_texts = [(page_num, page.extract_text()) for page_num, page in enumerate(reader.pages)]
-                elif file_path.endswith(".docx"):
-                    doc = docx.Document(file_path)
-                    page_texts = [(page_num, paragraph.text) for page_num, paragraph in enumerate(doc.paragraphs)]
-                else:
-                    return None
+        main_doc_id = bundle_docs[0]["id"] if bundle_docs else None
+        notes = ""
+        if main_doc_id:
+            annos = self._db.get_annotations(main_doc_id)
+            if annos:
+                notes = annos[-1]["note"]
 
-                lines = []
-                for page_num, text in page_texts:
-                    for sentence in sent_tokenize(text):
-                        lines.append((page_num, sentence))
-                self.tokenized_sentences[file_path] = lines
-        else:
-            lines = self.tokenized_sentences[file_path]
+        return {
+            "bundle_id": bundle_id,
+            "documents": bundle_docs,
+            "contents": contents,
+            "notes": notes
+        }
 
-        if self._restrict_search:
-            matches = self.process_text(lines, restrict=True)
-        else:
-            matches = self.process_text(lines)
-        return [[file_path, len(matches), matches]] if matches else None
+    def get_figures(self, query: str = "") -> List[Dict[str, Any]]:
+        """Returns figures matching query or recent figures with inline base64 data URIs."""
+        figs = self._db.search_figures(query, limit=50)
+        formatted = []
+        for f in figs:
+            item = dict(f)
+            rel_p = f.get("rel_image_path") or ""
+            item["rel_image_path"] = str(rel_p).replace("\\", "/")
+            watch_f = f.get("watch_folder") or ""
 
-    def process_text(self, lines: List[Tuple[int, str]], restrict: bool = False) -> list[list[Union[int, str]]]:
-        """
-        Process a list of text and search for occurrences of the search word.
+            # Construct absolute paths
+            full_img_path = ""
+            if watch_f and rel_p:
+                cand = os.path.join(watch_f, rel_p)
+                if os.path.exists(win_safe_path(cand)):
+                    full_img_path = os.path.abspath(cand)
+            if not full_img_path and os.path.isabs(str(rel_p)) and os.path.exists(win_safe_path(str(rel_p))):
+                full_img_path = os.path.abspath(str(rel_p))
 
-        :param lines: The list of text to process, containing tuples with page numbers and sentences.
-        :param restrict: Whether to restrict the search to only direct matches.
-        :return: A list of matches found in the text.
-                 Each match is represented by a tuple with the page number, sentence number, and the highlighted line.
-        """
-        matches = []
-        prev_page_num = 0
-        sentence_num_in_page = 0
+            item["full_image_path"] = full_img_path
+            doc_rel = f.get("rel_path") or ""
+            item["full_doc_path"] = os.path.abspath(os.path.join(watch_f, doc_rel)) if (watch_f and doc_rel) else ""
 
-        for line_num, (page_num, line) in enumerate(lines):
-            if prev_page_num != page_num:
-                sentence_num_in_page = 0
-                prev_page_num = page_num
+            # Provide base64 data URI for zero-CORS WebView2 rendering
+            item["data_url"] = ""
+            if full_img_path and os.path.exists(win_safe_path(full_img_path)):
+                try:
+                    fsize = os.path.getsize(win_safe_path(full_img_path))
+                    if fsize <= 3 * 1024 * 1024:
+                        ext = Path(full_img_path).suffix.lower()
+                        mime = "image/jpeg" if ext in {".jpg", ".jpeg"} else "image/png"
+                        with open(win_safe_path(full_img_path), "rb") as img_file:
+                            b64 = base64.b64encode(img_file.read()).decode("ascii")
+                            item["data_url"] = f"data:{mime};base64,{b64}"
+                except Exception as e:
+                    logger.debug(f"Failed to encode figure '{full_img_path}': {e}")
 
-            if restrict:
-                search_pattern = r'\b{}\b'.format(self._search_word)
+            formatted.append(item)
+        return formatted
+
+    def get_figure_data(self, figure_id: int) -> Dict[str, Any]:
+        """Loads and returns base64 data URI for an individual figure on demand."""
+        try:
+            conn = self._db.get_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT f.*, d.watch_folder, d.rel_path
+                FROM figures f
+                JOIN documents d ON f.doc_id = d.id
+                WHERE f.id = ?
+            """, (figure_id,))
+            row = cur.fetchone()
+            if not row:
+                return {"status": "error", "message": "Figure not found"}
+
+            watch_f = row["watch_folder"] or ""
+            rel_p = row["rel_image_path"] or ""
+            full_img_path = os.path.join(watch_f, rel_p) if (watch_f and rel_p) else ""
+            if not os.path.exists(win_safe_path(full_img_path)):
+                return {"status": "error", "message": "Figure file not found on disk"}
+
+            ext = Path(full_img_path).suffix.lower()
+            mime = "image/jpeg" if ext in {".jpg", ".jpeg"} else "image/png"
+            with open(win_safe_path(full_img_path), "rb") as img_file:
+                b64 = base64.b64encode(img_file.read()).decode("ascii")
+                data_url = f"data:{mime};base64,{b64}"
+
+            return {
+                "status": "ok",
+                "figure_id": figure_id,
+                "data_url": data_url,
+                "full_image_path": os.path.abspath(full_img_path),
+                "full_doc_path": os.path.abspath(os.path.join(watch_f, row["rel_path"] or ""))
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def save_document_note(self, doc_id: int, note: str) -> Dict[str, Any]:
+        """Saves a user annotation for a document."""
+        row_id = self._db.save_annotation(doc_id=doc_id, page_number=1, sentence_index=0, note=note)
+        return {"status": "ok", "annotation_id": row_id}
+
+    def open_native_file(self, file_path: str) -> Dict[str, Any]:
+        """Opens a PDF, Word doc, or folder in the default system viewer safely."""
+        if not file_path or not file_path.strip():
+            return {"status": "error", "message": "File path cannot be empty."}
+        safe_p = os.path.abspath(file_path.strip())
+        if not os.path.exists(win_safe_path(safe_p)):
+            return {"status": "error", "message": f"File does not exist: {safe_p}"}
+
+        ext = Path(safe_p).suffix.lower()
+        if ext in BLOCKED_EXTENSIONS:
+            return {"status": "error", "message": f"Blocked executable file type: {ext}"}
+
+        try:
+            if os.name == "nt":
+                os.startfile(safe_p)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", safe_p], check=False)
             else:
-                search_pattern = r'({}|{})'.format(self._search_word, '|'.join(map(re.escape, self.synonyms)))
-            found_words = re.findall(search_pattern, line, re.IGNORECASE)
-
-            if found_words:
-                line_highlighted = re.sub(search_pattern, lambda m: f'<<{m.group(0)}>>', line)
-                matches.append([page_num, sentence_num_in_page, line_highlighted])
-
-            sentence_num_in_page += 1
-
-        return matches
-
-    def process_files(self) -> List[Tuple[str, int, List[Tuple[int, int, str]]]]:
-        """
-        Search all the files in the search folder for occurrences of the search word.
-
-        :return: A list containing information about the matches found in each file.
-        """
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_file = {executor.submit(self.search_file, file_path): file_path for file_path in self.get_files()}
-            results = []
-            for future in concurrent.futures.as_completed(future_to_file):
-                result = future.result()
-                if result:
-                    results.extend(result)
-            return results
+                subprocess.run(["xdg-open", safe_p], check=False)
+            return {"status": "ok", "path": safe_p}
+        except Exception as e:
+            logger.error(f"Error opening native file '{safe_p}': {e}")
+            return {"status": "error", "message": str(e)}
 
 
-class LWSgui(ctk.CTk):
-    def __init__(self, *args, **kwargs):
+def main():
+    parser = argparse.ArgumentParser(description="LWS 2.0 - Luminous Word Search")
+    parser.add_argument(
+        "--dir",
+        type=str,
+        nargs="+",
+        help="Add or synchronize one or more directories (space-separated or comma-separated)"
+    )
+    parser.add_argument("--headless-sync", action="store_true", help="Run synchronizer headlessly and exit")
+    parser.add_argument("--no-figures", action="store_true", help="Disable figure extraction for faster indexing")
+    args = parser.parse_args()
 
-        """
-        Initialize the LWSgui.
+    config_mgr = ConfigManager()
+    cli_errors = 0
 
-        """
-        super().__init__(*args, **kwargs)
-        self.tokenized_sentences = None
-        self.current_directory = None
-        self.processor = None
+    # Handle multiple directories from CLI if provided
+    if args.dir:
+        for entry in args.dir:
+            for sub_p in entry.split(","):
+                clean_p = sub_p.strip().strip('"').strip("'")
+                if clean_p:
+                    if os.path.isdir(win_safe_path(clean_p)):
+                        config_mgr.add_watch_folder(os.path.abspath(clean_p))
+                    else:
+                        print(f"[LWS] Warning: Directory does not exist or is invalid: {clean_p}", file=sys.stderr)
+                        cli_errors += 1
 
-        self.minsize(800, 250)
+    db_path = config_mgr.get_database_path()
+    db = LwsDatabase(db_path)
+    thesaurus = ThesaurusManager(enable_wordnet=True)
+    synchronizer = LwsSynchronizer(db=db, extract_figures=not args.no_figures)
 
-        if ctk.get_appearance_mode() == 'Dark':
-            self.iconbitmap('Media/white.ico')
-        if ctk.get_appearance_mode() == 'Light':
-            self.iconbitmap('Media/dark.ico')
-        self.title("LWS - LuminousWordSearch")
+    if args.headless_sync:
+        print("[LWS] Running headless synchronization...")
+        try:
+            folders = config_mgr.get_watch_folders()
+            for f in folders:
+                print(f"[LWS] Syncing: {f}")
+                try:
+                    res = synchronizer.sync_watch_folder(f)
+                    print(f"[LWS] Done: {res['processed']} processed, {res['skipped']} up to date, {res['errors']} errors.")
+                    cli_errors += res.get("errors", 0)
+                except Exception as e:
+                    print(f"[LWS] Error syncing '{f}': {e}", file=sys.stderr)
+                    cli_errors += 1
+        finally:
+            db.close()
+        sys.exit(1 if cli_errors > 0 else 0)
 
-        self.left_frame = LeftFrame(self)
-        self.left_frame.grid(row=0, column=0, sticky="nsew")
+    # Launch GUI
+    api = LwsApi(config_mgr, db, synchronizer, thesaurus)
+    ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui")
+    index_html = os.path.join(ui_dir, "index.html")
 
-        self.right_frame = RightFrame(self)
-        self.right_frame.grid(row=0, column=1, sticky="nsew")
-
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
-        self.mainloop()
-
-    def display_result(self, text: str, color=None) -> None:
-        """
-        Display the result in the result text box.
-
-        :param text: The text to display.
-        :param color: The color of the text (optional).
-        :return: None
-        """
-        if color:
-            self.right_frame.result_text.tag_configure(color, foreground=color)
-            self.right_frame.result_text.insert("end", text, color)
-        else:
-            self.right_frame.result_text.insert("end", text)
-        self.right_frame.result_text.update_idletasks()
-
-    def browse_folder(self) -> None:
-        """
-        Open a folder selection dialog and set the selected folder as the search folder.
-        :return: None
-        """
-        folder = filedialog.askdirectory()
-        if folder:
-            self.left_frame.search_folder.set(folder)
-
-    def search(self, _event=None) -> None:
-        """
-        Perform the search based on the provided search word and folder.
-        :param _event: Tkinter event (default: None)
-        :return: None
-        """
-        search_word = self.left_frame.word_entry.get()
-        folder = self.left_frame.search_folder.get()
-        restrict_search = self.left_frame.restrict_var.get()
-
-        if not search_word or not folder:
-            messagebox.showwarning("Warning", "Please provide a search word and folder.")
-            return
-
-        if not search_word.lower() in words.words():
-            response = messagebox.askquestion("Word Not Found",
-                                              "The search word is not spelled correctly. Do you want to continue?")
-            if response == "no":
-                return
-
-        # Check if the processor should be updated
-        if self.processor is None or self.current_directory != folder:
-            self.processor = DocumentProcessor(folder, search_word, restrict_search)
-            self.current_directory = folder
-
-        if search_word != self.processor.search_word:
-            self.processor.search_word = search_word
-
-        if restrict_search != self.processor.restrict_search:
-            self.processor.restrict_search = restrict_search
-
-        self.left_frame.synonyms_frame.synonyms_text_box.delete('1.0', 'end')
-        self.right_frame.result_text.delete('1.0', 'end')
-        self.display_result("Results of searching for ", "black")
-        self.display_result(search_word, "orange")
-        self.display_result("\n\n", "black")
-        self.left_frame.progress_bar.set(0)
-        self.update()
-
-        synonyms = self.processor.synonyms
-        self.left_frame.synonyms_frame.synonyms_text_box.tag_configure("purple", foreground="purple")
-        if synonyms:
-            for tic, synonym in enumerate(synonyms):
-                self.left_frame.synonyms_frame.synonyms_text_box.insert("end", synonym, "purple")
-                if tic < len(synonyms) - 1:
-                    self.left_frame.synonyms_frame.synonyms_text_box.insert("end", ', ', "purple")
-        if not synonyms:
-            if not restrict_search:
-                self.left_frame.synonyms_frame.synonyms_text_box.tag_configure("red", foreground="red")
-                self.left_frame.synonyms_frame.synonyms_text_box.insert("end",
-                                                                        'You are in the non-optimized and dangerous'
-                                                                        ' mode!\nAnything you find can and will be '
-                                                                        'used against you in a court of science!',
-                                                                        "red")
-            if restrict_search:
-                self.left_frame.synonyms_frame.synonyms_text_box.insert("end",
-                                                                        'Restricted mode, no synonyms are allowed'
-                                                                        '\nYou are amazing as always, love you!',
-                                                                        "purple")
-        self.left_frame.synonyms_frame.synonyms_text_box.update_idletasks()
-        self.left_frame.progress_bar.set(0)
-        total_matches = 0
-        results = self.processor.process_files()
-        for result in results:
-            file_path, _, line_lists = result
-            self.left_frame.progress_bar.set(self.processor.docs_count / self.processor.all_docs)
-            self.update_idletasks()
-            if not result:
-                pass
-            file_name = os.path.basename(file_path)
-            self.display_result(f"\n{file_name}:\n", "blue")
-
-            # Count matches and update the total
-            direct_matches, synonym_matches = self.count_matches([result], search_word)
-            total_matches += direct_matches + synonym_matches
-
-            # Display match count
-            self.display_result(f"Direct matches: ")
-            self.display_result(f"{direct_matches}\n", "red")
-            self.display_result(f"Synonym matches: ")
-            self.display_result(f"{synonym_matches}\n", "purple")
-
-            for line_list in line_lists:
-                self.display_matches(line_list, search_word, synonyms)
-
-    def display_matches(self, line_list: Tuple[int, int, str], search_word: str, synonyms: List[str]) -> None:
-        """
-        Display matches in the result_text widget.
-
-        :param line_list: Tuple containing page number, line number, and highlighted sentence
-        :param search_word: The word being searched for
-        :param synonyms: List of synonyms for the search_word
-        :return: None
-        """
-        page_num, line_num, line_highlighted = line_list
-        self.display_result(f"Page {page_num + 1} Sentence {line_num + 1}: ", 'green')
-        all_words = line_highlighted.split('<<')
-        for word in all_words:
-            if '>>' in word:
-                word, remaining = word.split('>>', 1)
-                if word.lower() == search_word.lower():
-                    self.display_result(f"{word}", "red")
-                elif word.lower() in [synonym.lower() for synonym in synonyms]:
-                    self.display_result(f"{word}", "magenta")
-                else:
-                    self.display_result(word)
-                self.display_result(remaining)
-            else:
-                self.display_result(word)
-        self.display_result("\n")
-
-    @staticmethod
-    def count_matches(result: List[Tuple[str, int, List[Tuple[int, int, str]]]], search_word: str) -> Tuple[int, int]:
-        """
-        Count direct matches and synonym matches in the result.
-
-        :param result: List of results from searching the file
-        :param search_word: The word being searched for
-        :return: Tuple containing direct_matches and synonym_matches
-        """
-        direct_matches = 0
-        synonym_matches = 0
-        for r in result:
-            _, _, line_lists = r
-            for line_list in line_lists:
-                _, _, line_highlighted = line_list
-                if search_word.lower() in line_highlighted.lower():
-                    direct_matches += 1
-                else:
-                    synonym_matches += 1
-        return direct_matches, synonym_matches
-
-    def update_font(self, action, value=None):
-        """
-        Update the font size or font face of the result_text and synonyms_text_box based on button clicks or option
-        menu selection.
-
-        :param action: The action to perform, either "increase", "decrease", or "change_face".
-        :param value: The font face to change to when the action is "change_face".
-        :return: None
-        """
-        widgets = [self.right_frame.result_text, self.left_frame.synonyms_frame.synonyms_text_box]
-
-        for widget in widgets:
-            current_font = widget.cget("font")
-            current_font_size = widget.tk.call("font", "actual", current_font, "-size")
-            current_font_face = widget.tk.call("font", "actual", current_font, "-family")
-            new_font_size = current_font_size
-
-            if action == "increase":
-                new_font_size += 1
-            elif action == "decrease":
-                new_font_size -= 1
-            elif action == "change_face":
-                current_font_face = value
-
-            if new_font_size > 0:
-                widget.configure(font=(current_font_face, new_font_size))
-
-
-class LeftFrame(ctk.CTkFrame):
-    """
-    The left frame of the LWSgui containing the search controls.
-    """
-
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(master=parent, *args, **kwargs)
-        self.parent = parent
-        self.search_folder = StringVar()
-        self.folder_label = ctk.CTkLabel(self, text="Search folder:")
-        self.folder_entry = ctk.CTkEntry(self, textvariable=self.search_folder)
-        self.browse_button = ctk.CTkButton(self, text="Browse", command=self.parent.browse_folder)
-        self.word_label = ctk.CTkLabel(self, text="Search word:")
-        self.word_entry = ctk.CTkEntry(self)
-        self.word_entry.bind("<KeyPress>", self.no_space_keypress)
-        self.word_entry.bind("<Return>", self.parent.search)
-        self.restrict_var = ctk.BooleanVar()
-        self.restrict_check = ctk.CTkCheckBox(self, text="Restrict search", variable=self.restrict_var)
-        self.search_button = ctk.CTkButton(self, text="Search", command=self.parent.search)
-        self.progress_bar = ctk.CTkProgressBar(self)
-        self.progress_bar.set(0)
-        self.folder_label.grid(row=0, column=0, padx=5, pady=5)
-        self.folder_entry.grid(row=0, column=1, padx=5, pady=5)
-        self.browse_button.grid(row=0, column=2, padx=5, pady=5)
-        self.word_label.grid(row=1, column=0, padx=5, pady=5)
-        self.word_entry.grid(row=1, column=1, padx=5, pady=5)
-        self.restrict_check.grid(row=1, column=2, padx=5, pady=5)
-        self.search_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5)
-        self.progress_bar.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-
-        self.font_controls_frame = FontControlFrame(self)
-        self.font_controls_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=5)
-
-        self.synonyms_frame = SynonymsFrame(self)
-        self.synonyms_frame.grid(row=5, column=0, columnspan=3, padx=5, pady=5)
-
-    @staticmethod
-    def no_space_keypress(event):
-        if event.keysym == "space":
-            return "break"
-
-
-class RightFrame(ctk.CTkFrame):
-    """
-    Right frame of the LWSgui containing the result text box.
-    """
-
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(master=parent, *args, **kwargs)
-        self.parent = parent
-        self.result_text = Text(self, wrap='word')
-        self.result_text.grid(row=0, column=0, pady=5, sticky="nsew")
-        self.result_text.tag_configure("orange", foreground="orange")
-        self.scroll_bar = ctk.CTkScrollbar(self, command=self.result_text.yview)
-        self.scroll_bar.grid(row=0, column=1, sticky='nsew')
-        self.result_text['yscrollcommand'] = self.scroll_bar.set
-        self.rowconfigure(0, weight=1)
-        self.columnconfigure(0, weight=1)
-
-
-class FontControlFrame(ctk.CTkFrame):
-    """
-    Frame containing font size and font face controls for the result_text and synonyms_text_box widgets.
-    """
-
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(master=parent, *args, **kwargs)
-        self.parent = parent
-        self.font_size_label = ctk.CTkLabel(self, text="Font Size:")
-        self.font_size_label.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        self.increase_font_button = ctk.CTkButton(self, text="+", width=20, height=20,
-                                                  command=lambda: self.parent.parent.update_font("increase"))
-        self.decrease_font_button = ctk.CTkButton(self, text="-", width=20, height=20,
-                                                  command=lambda: self.parent.parent.update_font("decrease"))
-        self.increase_font_button.grid(row=1, column=0, padx=(0, 2), pady=5)
-        self.decrease_font_button.grid(row=1, column=1, padx=(2, 0), pady=5)
-
-        # Font face OptionMenu
-        self.font_face_label = ctk.CTkLabel(self, text="Font:")
-        self.font_face_label.grid(row=0, column=3, padx=5, pady=5, sticky="EW")
-        self.font_var = ctk.StringVar()
-        self.available_fonts = ["Arial", "Courier", "Helvetica", "Times New Roman", "Verdana", "Comic Sans MS",
-                                "Georgia", "Lucida Sans", "Tahoma", "Trebuchet MS"]
-        self.font_var.set(self.available_fonts[0])
-
-        def option_menu_callback(choice):
-            self.parent.parent.update_font("change_face", choice)
-
-        self.font_option_menu = ctk.CTkOptionMenu(master=self,
-                                                  values=self.available_fonts,
-                                                  command=option_menu_callback,
-                                                  variable=self.font_var)
-        self.font_option_menu.grid(row=1, column=3, columnspan=2, padx=5, pady=5, sticky="EW")
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=5)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(2, weight=9)
-
-
-class SynonymsFrame(ctk.CTkFrame):
-    """
-    Frame containing a text box to display the synonyms of the search word.
-    """
-
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(master=parent, *args, **kwargs)
-        self.parent = parent
-        self.configure(width=350, height=250)
-        self.pack_propagate(False)
-        self.synonyms_text_box_label = ctk.CTkLabel(self, text="Synonyms of searching word")
-        self.synonyms_text_box = Text(self, wrap='word', height=1, width=1)
-        self.synonyms_text_box_label.pack(pady=5)
-        self.synonyms_text_box.pack(side='left', pady=0, fill='both', expand=True)
-        self.synonyms_text_box_scroll_bar = ctk.CTkScrollbar(self, command=self.synonyms_text_box.yview)
-        self.synonyms_text_box_scroll_bar.pack(side='right', fill='both')
-        self.synonyms_text_box['yscrollcommand'] = self.synonyms_text_box_scroll_bar.set
+    try:
+        window = webview.create_window(
+            title="LWS 2.0 — Luminous Word Search",
+            url=index_html,
+            js_api=api,
+            width=1340,
+            height=860,
+            min_size=(1024, 700),
+            background_color="#080B11"
+        )
+        api.set_window(window)
+        webview.start(debug=False)
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
-    LWSgui()
+    main()

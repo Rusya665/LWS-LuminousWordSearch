@@ -1,0 +1,14 @@
+# Core UI & Application
+pywebview>=5.0.0
+
+# Document & PDF Parsing
+pypdfium2>=4.30.0
+Pillow>=10.0.0
+python-pptx>=0.6.21
+
+# Natural Language Processing & Thesaurus
+nltk>=3.8.1
+
+# Testing & Development
+pytest>=8.0.0
+
