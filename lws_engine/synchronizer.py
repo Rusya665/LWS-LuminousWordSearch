@@ -322,17 +322,17 @@ class LwsSynchronizer:
                 progress_cb(idx + 1, total, filename, "Checking...")
 
             existing = ref_data.get(rel_path)
-            # Incremental check
+            # Incremental check: must exist in both references.json AND SQLite documents table
             if not force_reindex and existing:
                 if existing.get("file_size") == fsize and abs(existing.get("mtime", 0) - mtime) < 0.1:
-                    # If figure extraction is enabled, backfill figures if not already extracted
-                    if self.extract_figures and ext in {".pdf", ".docx", ".pptx"} and not existing.get("figures_extracted"):
-                        try:
-                            conn = self.db.get_connection()
-                            cur = conn.cursor()
-                            cur.execute("SELECT id FROM documents WHERE watch_folder = ? AND rel_path = ?", (watch_path, rel_path))
-                            doc_row = cur.fetchone()
-                            if doc_row:
+                    conn = self.db.get_connection()
+                    cur = conn.cursor()
+                    cur.execute("SELECT id FROM documents WHERE watch_folder = ? AND rel_path = ?", (watch_path, rel_path))
+                    doc_row = cur.fetchone()
+                    if doc_row is not None:
+                        # If figure extraction is enabled, backfill figures if not already extracted
+                        if self.extract_figures and ext in {".pdf", ".docx", ".pptx"} and not existing.get("figures_extracted"):
+                            try:
                                 doc_id = doc_row["id"]
                                 if progress_cb:
                                     progress_cb(idx + 1, total, filename, "Extracting figures...")
@@ -363,10 +363,10 @@ class LwsSynchronizer:
                                 existing["figures_extracted"] = True
                                 existing["figures_count"] = len(extracted_figs)
                                 ref_data[rel_path] = existing
-                        except Exception as fe:
-                            logger.warning(f"Figure backfill failed for '{rel_path}': {fe}")
-                    skipped += 1
-                    continue
+                            except Exception as fe:
+                                logger.warning(f"Figure backfill failed for '{rel_path}': {fe}")
+                        skipped += 1
+                        continue
 
             # Process file
             if progress_cb:
